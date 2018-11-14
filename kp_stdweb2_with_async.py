@@ -9,6 +9,7 @@ import json
 import aiohttp
 import aiofiles
 from bs4 import BeautifulSoup, element
+from tenacity import retry
 
 url = 'http://stdweb2.korean.go.kr/section/north_list.jsp'
 headers = {
@@ -23,6 +24,7 @@ class EmptyPage(Exception):
     pass
 
 
+@retry
 async def http_request(page=1, letter='ㄱ'):
     data = dict(idx='', go=page, gogroup='', Letter=letter, Table='', Gubun='', SearchText='',
                 TableTemp='WORD', GubunTemp='0', SearchTextTemp='')
@@ -71,8 +73,7 @@ async def request(semaphore: asyncio.Semaphore, target_dir, page, letter):
     await dump_json(data, target_dir)
 
 
-async def run():
-    target_dir = 'tmp'
+async def run(target_dir):
     if not os.path.isdir(target_dir):
         os.mkdir(target_dir)
 
@@ -89,8 +90,7 @@ async def run():
     await asyncio.gather(*jobs)
 
 
-def merge_json():
-    target_dir = 'tmp'
+def merge_json(target_dir, output):
     data = []
 
     for filename in os.listdir(target_dir):
@@ -99,11 +99,12 @@ def merge_json():
             data.extend(json.load(f))
 
     print(len(data))
-    with open('async_output.json', 'w') as f:
+    with open(output, 'w') as f:
         json.dump(data, f)
 
 
 if __name__ == '__main__':
+    target_dir = 'tmp'
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run())
-    merge_json()
+    loop.run_until_complete(run(target_dir))
+    merge_json(target_dir, 'kp_async_output.json')
