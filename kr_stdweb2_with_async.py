@@ -21,11 +21,6 @@ pattern_word = re.compile(
 pattern_num = re.compile(r'<span class="tb12">.*?[(](\d+?)건[)]</span>', re.DOTALL)
 
 
-# pattern = re.compile(
-#     '<p class="exp">.*?<strong>.+?<font.+?>(.+?)</font></a>.+?<br[/]?>.+?<font.+?>(.+?)</font>.+?<br[/]?>(.+?)</p>',
-#     re.DOTALL)
-
-
 class EmptyPage(Exception):
     pass
 
