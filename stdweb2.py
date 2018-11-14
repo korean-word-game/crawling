@@ -49,11 +49,28 @@ def request(page=1, letter='ㄱ'):
 
 
 if __name__ == '__main__':
+    from pyexcelerate import Workbook
+    import json
+
+    data = []
+    data_json = []
+
+    n = 1
     for letter in 'ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ':
         for i in range(1, 1000):
             try:
                 for word, part, meaning in request(i, letter):
+                    data.append([n, word, meaning.replace('=', "'="), letter])
+                    data_json.append([n, word, meaning, letter])
                     print(word, part, meaning)
+                    n += 1
 
             except EmptyPage:
                 pass
+
+    wb = Workbook()
+    wb.new_sheet("", data=data)
+    wb.save("output.xlsx")
+
+    with open('output.json', 'w') as f:
+        json.dump(data_json, f)
