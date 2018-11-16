@@ -15,6 +15,7 @@ def is_available_word(word, part):
         return False
     if not part == '명사':
         return False
+    return True
 
 
 with open('async_output.json', 'r', encoding='utf-8') as f:
@@ -28,6 +29,6 @@ for word, part, meaning in table:
             word_dict[word] = meaning
 
 with open('sqlite_input.csv', 'w', newline='', encoding='utf-8') as csv_file:
-    writer = csv.writer(csv_file, delimiter='^', quotechar='"')
+    writer = csv.writer(csv_file)
     for word, meaning in word_dict.items():
         writer.writerow([word, meaning, 0, 1])  # 북한어
