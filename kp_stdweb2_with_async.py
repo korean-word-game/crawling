@@ -15,9 +15,11 @@ url = 'http://stdweb2.korean.go.kr/section/north_list.jsp'
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
                   ' Chrome/70.0.3538.77 Safari/537.36'}
-pattern = re.compile(
-    '<p class="exp">.*?<strong>.+?<font.+?>(.+?)</font></a>.+?<br[/]?>.+?<font.+?>(.+?)</font>.+?<br[/]?>(.+?)</p>',
+pattern_word = re.compile(
+    '<p class="exp">.*?<font.*?>(?P<word>.+?)</font>.*?<br.*?>.*?'
+    '(<font.*?>(?P<part>.*?)</font>.*?)?<br.*?>(?P<meaning>.+?)</p>',
     re.DOTALL)
+pattern_num = re.compile(r'<div class="result_title">.*?[(](\d+?)건[)].*?</div>', re.DOTALL)
 
 
 class EmptyPage(Exception):
@@ -25,25 +27,38 @@ class EmptyPage(Exception):
 
 
 @retry
-async def http_request(page=1, letter='ㄱ'):
-    data = dict(idx='', go=page, gogroup='', Letter=letter, Table='', Gubun='', SearchText='',
-                TableTemp='WORD', GubunTemp='0', SearchTextTemp='')
+async def http_request(page=1, letter='ㄱ', num_per_page=10):
+    _page_div, _page_mod = divmod(page, 10)
+    if _page_mod == 1:
+        gogroup = _page_div + 1
+        page = ''
+    else:
+        gogroup = ''
+
+    data = dict(go=page, gogroup=gogroup, TableTemp='WORD', GubunTemp=0, Letter=letter, PageRow=num_per_page)
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=data, headers=headers) as response:
+        async with session.post(url, data=data, headers=headers, timeout=300) as response:
+            if not response.status == 200:
+                raise Exception('bad status code: {}'.format(response.status))
             return await response.text()
+
+
+def _get_word_num(html):
+    rex = pattern_num.search(html)
+    if rex:
+        return int(rex.group(1))
 
 
 def parse(html):
     result = []
-    soup = BeautifulSoup(html, 'html.parser')
-    for k in soup.find_all('p', {'class': 'exp'}):
-        k: element.Tag
-        rex = pattern.findall(str(k))
-        if rex:
-            word, part, meaning_html = rex[0]
-            meaning = BeautifulSoup(meaning_html, 'html.parser').text
-            result.append((word, part, meaning))
+    rex = pattern_word.findall(html)
+    for k in rex:
+        word = BeautifulSoup(k[0], 'html.parser').text
+        part = k[2]
+        meaning = BeautifulSoup(k[3], 'html.parser').text
+        result.append((word, part, meaning))
+
     return result
 
 
@@ -55,7 +70,9 @@ async def async_parse(html):
     return json.dumps(data)
 
 
-async def dump_json(data: str, target_dir='tmp'):
+async def async_dump_json(data: str, target_dir='tmp'):
+    if not os.path.isdir(target_dir):
+        os.mkdir(target_dir)
     filename = '{}.json'.format(uuid.uuid4().hex)
     file_path = os.path.join(target_dir, filename)
 
@@ -65,46 +82,60 @@ async def dump_json(data: str, target_dir='tmp'):
     return file_path
 
 
-async def request(semaphore: asyncio.Semaphore, target_dir, page, letter):
+async def request(semaphore: asyncio.Semaphore, target_dir, letter, num_per_page=1000):
+    loop = asyncio.get_event_loop()
     async with semaphore:
-        print('request {}\t{} ...'.format(letter, page))
-        html = await http_request(page, letter)
-    data = await async_parse(html)
-    await dump_json(data, target_dir)
+        print('request {}\t({}/?) ...'.format(letter, 1))
+        html = await http_request(1, letter, num_per_page)
+
+    word_num = await loop.run_in_executor(None, _get_word_num, html)
+    if word_num:
+        print('{} 개수 {} 개'.format(letter, word_num))
+        page_cnt, page_mod = divmod(word_num, num_per_page)
+        if page_mod:
+            page_cnt += 1
+
+        data = await async_parse(html)
+        await async_dump_json(data, target_dir)
+
+        for page in range(2, page_cnt + 1):
+            async with semaphore:
+                print('request {}\t({}/{}) ...'.format(letter, page, page_cnt))
+                html = await http_request(page, letter, num_per_page)
+
+            try:
+                data = await async_parse(html)
+                await async_dump_json(data, target_dir)
+            except EmptyPage:
+                print('단어 없음: {}'.format(letter))
 
 
 async def run(target_dir):
-    if not os.path.isdir(target_dir):
-        os.mkdir(target_dir)
-
-    semaphore = asyncio.Semaphore(100)
-
-    letters = list('ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ')
-    pages = {k: v for k, v in zip(letters, (881, 260, 495, 696, 333, 594, 530, 728, 620, 218, 66, 113, 147, 398))}
+    semaphore = asyncio.Semaphore(25)
 
     jobs = []
-    for letter in letters:
-        for i in range(1, pages[letter] + 1):
-            jobs.append(request(semaphore, target_dir, i, letter))
+    for letter in 'ㄱㄴㄷㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ':
+        jobs.append(request(semaphore, target_dir, letter, 1000))
 
     await asyncio.gather(*jobs)
 
 
-def merge_json(target_dir, output):
-    data = []
+def merge_json(target_dir):
+    if os.path.isdir(target_dir):
+        data = []
 
-    for filename in os.listdir(target_dir):
-        file_path = os.path.join(target_dir, filename)
-        with open(file_path, 'r') as f:
-            data.extend(json.load(f))
+        for filename in os.listdir(target_dir):
+            file_path = os.path.join(target_dir, filename)
+            with open(file_path, 'r') as f:
+                data.extend(json.load(f))
 
-    print(len(data))
-    with open(output, 'w') as f:
-        json.dump(data, f)
+        with open('async_output.json', 'w') as f:
+            json.dump(data, f)
 
 
 if __name__ == '__main__':
     target_dir = 'tmp'
+
     loop = asyncio.get_event_loop()
     loop.run_until_complete(run(target_dir))
-    merge_json(target_dir, 'kp_async_output.json')
+    merge_json(target_dir)
