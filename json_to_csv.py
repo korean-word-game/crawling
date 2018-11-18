@@ -5,7 +5,7 @@ import re
 
 korean_set = list(range(ord('가'), ord('힣') + 1))
 pattern_is_not_hangul = re.compile('[^가-힣]')
-pattern_special = re.compile('(!-/|:-@|\[-`)')
+pattern_special = re.compile('([!-/]|[:-@]|[\[-`])')
 
 
 def is_available_word(word, part):
@@ -18,7 +18,7 @@ def is_available_word(word, part):
     return True
 
 
-with open('async_output.json', 'r', encoding='utf-8') as f:
+with open('async_output.json', encoding='utf-8') as f:
     table = json.load(f)
 
 word_dict = {}
@@ -28,7 +28,7 @@ for word, part, meaning in table:
         if word not in word_dict:
             word_dict[word] = meaning
 
-with open('sqlite_input.csv', 'w', newline='', encoding='utf-8') as csv_file:
+with open('sqlite_input.csv', 'w', newline='', encoding='utf-8-sig') as csv_file:
     writer = csv.writer(csv_file)
     for word, meaning in word_dict.items():
         writer.writerow([word, meaning, 0, 1])  # 북한어
