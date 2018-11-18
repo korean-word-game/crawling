@@ -16,7 +16,8 @@ headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
                   ' Chrome/70.0.3538.77 Safari/537.36'}
 pattern_word = re.compile(
-    '<p class="exp">.*?<strong><font.*?>(.+?)</font></strong>.*?<br [/]?>.*?<font.*?>(.*?)</font>.*?<br />(.+?)</p>',
+    '<p class="exp">.*?<font.*?>(?P<word>.+?)</font>.*?<br.*?>.*?'
+    '(<font.*?>(?P<part>.*?)</font>.*?)?<br.*?>(?P<meaning>.+?)</p>',
     re.DOTALL)
 pattern_num = re.compile(r'<span class="tb12">.*?[(](\d+?)건[)]</span>', re.DOTALL)
 
@@ -26,12 +27,21 @@ class EmptyPage(Exception):
 
 
 @retry
-async def http_request(page=1, letter='가', num_per_page=1000):
-    data = dict(go=page, PageRow=num_per_page, SearchPart='Simple', arrSearchLen=0,
-                Table='words|word', Gubun=1, SearchText=letter, SpCode=1)
+async def http_request(page=1, letter='ㄱ', num_per_page=10):
+    _page_div, _page_mod = divmod(page, 10)
+    if _page_mod == 1:
+        gogroup = _page_div + 1
+        page = ''
+    else:
+        gogroup = ''
+
+    data = dict(go=page, gogroup=gogroup, PageRow=num_per_page, SearchPart='Jaso', Table='words|word', Gubun=0,
+                Jaso1=letter, JasoSearch='[{}/?/?]'.format(letter), focus_name='SearchText')
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=data, headers=headers) as response:
+        async with session.post(url, data=data, headers=headers, timeout=300) as response:
+            if not response.status == 200:
+                raise Exception('bad status code: {}'.format(response.status))
             return await response.text()
 
 
@@ -41,22 +51,15 @@ def _get_word_num(html):
         return int(rex.group(1))
 
 
-@retry
-async def set_word_num(semaphore: asyncio.Semaphore, d: dict, letter):
-    loop = asyncio.get_event_loop()
-    async with semaphore:
-        html = await http_request(letter=letter, num_per_page=1)
-    num = await loop.run_in_executor(None, _get_word_num, html)
-    if num:
-        d[letter] = num
-
-
 def parse(html):
     result = []
-    for word, part, meaning_html in pattern_word.findall(html):
-        meaning = BeautifulSoup(meaning_html, 'html.parser').text
+    rex = pattern_word.findall(html)
+    for k in rex:
+        word = BeautifulSoup(k[0], 'html.parser').text
+        part = k[2]
+        meaning = BeautifulSoup(k[3], 'html.parser').text
         result.append((word, part, meaning))
-    print(len(result))
+
     return result
 
 
@@ -68,7 +71,9 @@ async def async_parse(html):
     return json.dumps(data)
 
 
-async def dump_json(data: str, target_dir='tmp'):
+async def async_dump_json(data: str, target_dir='tmp'):
+    if not os.path.isdir(target_dir):
+        os.mkdir(target_dir)
     filename = '{}.json'.format(uuid.uuid4().hex)
     file_path = os.path.join(target_dir, filename)
 
@@ -78,136 +83,60 @@ async def dump_json(data: str, target_dir='tmp'):
     return file_path
 
 
-async def request(semaphore: asyncio.Semaphore, target_dir, page, letter, num_per_page=1000):
+async def request(semaphore: asyncio.Semaphore, target_dir, letter, num_per_page=1000):
+    loop = asyncio.get_event_loop()
     async with semaphore:
-        print('request {}\t{} ...'.format(letter, page))
-        html = await http_request(page, letter, num_per_page)
-    try:
+        print('request {}\t({}/?) ...'.format(letter, 1))
+        html = await http_request(1, letter, num_per_page)
+
+    word_num = await loop.run_in_executor(None, _get_word_num, html)
+    if word_num:
+        print('{} 개수 {} 개'.format(letter, word_num))
+        page_cnt, page_mod = divmod(word_num, num_per_page)
+        if page_mod:
+            page_cnt += 1
+
         data = await async_parse(html)
-        await dump_json(data, target_dir)
-    except EmptyPage:
-        pass
+        await async_dump_json(data, target_dir)
+
+        for page in range(2, page_cnt + 1):
+            async with semaphore:
+                print('request {}\t({}/{}) ...'.format(letter, page, page_cnt))
+                html = await http_request(page, letter, num_per_page)
+
+            try:
+                data = await async_parse(html)
+                await async_dump_json(data, target_dir)
+            except EmptyPage:
+                print('단어 없음: {}'.format(letter))
 
 
-async def run():
-    target_dir = 'tmp'
-    if not os.path.isdir(target_dir):
-        os.mkdir(target_dir)
-
-    semaphore = asyncio.Semaphore(10)
-
-    letters = [chr(i) for i in range(ord('가'), ord('힣') + 1)]
-
-    # # get word nums
-    # print('get word nums ...')
-    # jobs = []
-    # word_nums = {}
-    # for letter in letters:
-    #     jobs.append(set_word_num(semaphore, word_nums, letter))
-    # await asyncio.gather(*jobs)
-
-    word_nums = {'자': 2794, '작': 637, '잔': 488, '잘': 51, '잠': 338, '키': 184, '잡': 354, '잣': 54, '장': 2170, '재': 1075,
-                 '떡': 117, '탈': 321, '겨': 162, '격': 292, '견': 413, '쟁': 89, '결': 540, '떼': 113, '겹': 234, '겸': 153,
-                 '경': 1928, '곁': 118, '계': 1136, '곡': 326, '고': 3612, '곤': 229, '골': 506, '곰': 122, '곱': 144, '공': 2046,
-                 '터': 136, '턱': 83, '저': 752, '털': 270, '적': 966, '전': 3200, '절': 606, '똥': 107, '뼈': 85, '곽': 67,
-                 '과': 751, '점': 531, '접': 395, '관': 1133, '테': 204, '정': 2613, '젖': 133, '제': 1493, '텔': 57, '광': 888,
-                 '괘': 78, '괴': 262, '뽕': 83, '교': 1091, '토': 806, '톱': 85, '통': 943, '국': 785, '구': 2726, '군': 744,
-                 '굳': 70, '굴': 315, '족': 202, '존': 184, '조': 2545, '좀': 191, '졸': 164, '좁': 61, '종': 1138, '좌': 472,
-                 '굽': 78, '궁': 408, '권': 496, '궐': 86, '뚝': 54, '궤': 109, '퇴': 272, '죄': 90, '뿌': 90, '귀': 806,
-                 '뿔': 122, '투': 429, '죽': 303, '주': 2134, '준': 317, '줄': 321, '퉁': 67, '규': 273, '균': 139, '귤': 51,
-                 '그': 597, '극': 407, '근': 518, '중': 1831, '글': 259, '금': 1380, '급': 332, '뜨': 80, '뜬': 63, '기': 3004,
-                 '긴': 302, '길': 302, '쥐': 164, '김': 590, '깃': 87, '특': 232, '트': 289, '까': 242, '깔': 94, '깜': 64,
-                 '깨': 128, '띠': 110, '라': 537, '락': 205, '즉': 104, '란': 205, '랑': 89, '증': 418, '래': 87, '티': 220,
-                 '파': 995, '판': 439, '팔': 516, '사': 4676, '삭': 181, '산': 1743, '랭': 166, '살': 518, '지': 2508, '직': 534,
-                 '삼': 1685, '진': 1529, '삽': 111, '질': 323, '상': 2366, '새': 599, '꺼': 58, '색': 322, '짐': 98, '꺾': 53,
-                 '집': 482, '징': 177, '량': 367, '짚': 61, '팥': 55, '패': 321, '팽': 67, '짜': 66, '짝': 88, '생': 1014,
-                 '샤': 106, '레': 288, '석': 701, '서': 1312, '선': 1752, '설': 570, '퍼': 53, '려': 191, '력': 126, '섬': 242,
-                 '섭': 118, '련': 498, '성': 1299, '렬': 95, '꼬': 316, '세': 1382, '센': 56, '꼭': 78, '령': 299, '꼴': 74,
-                 '례': 132, '꽁': 56, '꽃': 419, '페': 285, '로': 917, '록': 183, '론': 121, '셰': 52, '롱': 78, '편': 496,
-                 '평': 628, '폐': 370, '소': 2905, '속': 725, '손': 555, '솔': 239, '솜': 75, '송': 548, '포': 992, '폭': 189,
-                 '뢰': 62, '폴': 129, '쪼': 70, '쪽': 124, '꾸': 77, '쇄': 116, '꿀': 63, '쇠': 511, '료': 65, '룡': 154,
-                 '루': 286, '표': 432, '쇼': 64, '수': 3742, '숙': 411, '순': 688, '술': 248, '푸': 224, '풀': 283, '품': 119,
-                 '풍': 575, '풋': 109, '숨': 93, '숫': 112, '숭': 114, '끄': 55, '끌': 59, '끝': 90, '류': 447, '륙': 214,
-                 '륜': 94, '쉬': 77, '끼': 51, '릉': 78, '슈': 161, '프': 354, '스': 725, '낙': 385, '플': 197, '나': 1426,
-                 '난': 617, '날': 410, '슬': 99, '리': 743, '남': 874, '습': 182, '린': 123, '납': 254, '낭': 226, '낮': 59,
-                 '승': 525, '낱': 56, '내': 1319, '립': 177, '림': 178, '마': 1639, '만': 965, '막': 366, '냉': 223, '말': 786,
-                 '망': 553, '맞': 227, '매': 816, '맥': 165, '맨': 77, '식': 506, '시': 2092, '신': 1908, '실': 946, '심': 757,
-                 '십': 339, '싱': 61, '싸': 144, '피': 881, '맹': 238, '쌀': 118, '필': 276, '쌍': 497, '학': 351, '하': 1319,
-                 '한': 1118, '할': 190, '찌': 80, '너': 129, '널': 89, '넓': 99, '함': 354, '합': 417, '항': 474, '넉': 61,
-                 '해': 1211, '핵': 127, '햇': 80, '행': 450, '넙': 53, '네': 237, '머': 313, '먹': 239, '먼': 105, '멀': 70,
-                 '차': 784, '착': 214, '찬': 223, '찰': 134, '참': 650, '창': 577, '책': 174, '채': 474, '녀': 171, '년': 135,
-                 '멍': 78, '메': 492, '멜': 63, '향': 441, '멧': 57, '허': 587, '처': 219, '헌': 157, '척': 220, '천': 1585,
-                 '철': 609, '험': 52, '헛': 151, '멱': 59, '면': 463, '멸': 89, '노': 1535, '녹': 416, '논': 273, '명': 842,
-                 '놀': 92, '놋': 59, '농': 581, '높': 59, '첨': 201, '첩': 117, '헤': 227, '첫': 138, '청': 1231, '모': 1599,
-                 '체': 445, '목': 961, '몰': 202, '몸': 155, '못': 59, '혀': 59, '혁': 111, '몽': 260, '현': 738, '혈': 243,
-                 '협': 247, '형': 358, '혜': 154, '뇌': 276, '호': 1366, '혹': 88, '혼': 400, '홀': 187, '홈': 67, '홍': 618,
-                 '누': 676, '홑': 121, '화': 1484, '눈': 604, '확': 103, '환': 580, '활': 322, '촉': 168, '초': 1331, '촌': 181,
-                 '가': 3601, '총': 525, '탄': 355, '황': 930, '묘': 277, '묵': 204, '무': 2452, '문': 1013, '물': 1355, '회': 860,
-                 '횡': 182, '효': 180, '최': 374, '쑥': 75, '탐': 198, '탑': 90, '탕': 135, '뉴': 76, '태': 621, '후': 751,
-                 '택': 62, '훈': 190, '추': 845, '축': 413, '춘': 245, '출': 465, '느': 71, '충': 339, '능': 276, '늦': 107,
-                 '타': 671, '갈': 662, '탁': 203, '간': 907, '각': 631, '갑': 201, '감': 1162, '갓': 97, '강': 1243, '개': 1652,
-                 '객': 177, '니': 278, '휘': 159, '취': 457, '쓰': 56, '휴': 209, '미': 1430, '민': 581, '밀': 463, '흉': 182,
-                 '흐': 54, '흑': 348, '흔': 51, '밑': 175, '다': 1343, '흘': 55, '단': 1569, '달': 440, '닭': 152, '답': 109,
-                 '담': 461, '당': 853, '대': 3387, '흙': 163, '흠': 63, '흡': 144, '흥': 148, '희': 237, '흰': 389, '박': 610,
-                 '바': 1495, '반': 1803, '받': 65, '발': 960, '씨': 197, '밤': 208, '밥': 161, '방': 1530, '밭': 133, '백': 1375,
-                 '배': 1215, '측': 263, '층': 160, '악': 447, '아': 2709, '안': 1290, '뱃': 60, '히': 139, '앉': 75, '알': 695,
-                 '치': 681, '암': 570, '압': 232, '친': 261, '앙': 209, '칠': 367, '앞': 314, '더': 249, '애': 882, '덕': 161,
-                 '액': 155, '침': 416, '칭': 65, '덜': 54, '카': 569, '칼': 213, '칸': 51, '캐': 73, '덤': 62, '덧': 173, '앵': 99,
-                 '덩': 86, '데': 205, '야': 643, '약': 564, '버': 451, '번': 344, '벌': 295, '양': 1628, '범': 345, '법': 404,
-                 '베': 490, '벤': 59, '벨': 67, '어': 1340, '억': 156, '언': 309, '얼': 352, '벼': 215, '업': 97, '벽': 297,
-                 '엇': 84, '엄': 256, '변': 501, '엉': 93, '별': 475, '에': 708, '엔': 65, '엘': 102, '커': 75, '엠': 54,
-                 '독': 741, '도': 2430, '병': 640, '돈': 251, '돌': 801, '동': 2167, '돼': 71, '역': 696, '여': 1230, '연': 2007,
-                 '열': 705, '보': 1834, '케': 140, '복': 1006, '염': 622, '본': 442, '엽': 125, '볼': 178, '엿': 53, '영': 1341,
-                 '옆': 91, '봄': 118, '예': 711, '봉': 731, '되': 139, '된': 87, '옥': 613, '온': 298, '오': 2482, '올': 283,
-                 '옴': 59, '옷': 98, '옹': 196, '코': 521, '콘': 76, '콜': 112, '두': 1016, '둔': 113, '콩': 231, '둘': 57,
-                 '와': 281, '완': 385, '왕': 595, '왜': 242, '둥': 216, '북': 519, '분': 1079, '부': 2458, '불': 1618, '붉': 176,
-                 '외': 1148, '왼': 68, '쾌': 84, '요': 731, '욕': 102, '붓': 59, '붕': 117, '붙': 60, '용': 829, '우': 1586,
-                 '뒤': 340, '운': 509, '울': 208, '뒷': 269, '웃': 201, '움': 53, '웅': 153, '원': 1328, '월': 400, '쿠': 117,
-                 '웨': 63, '위': 901, '드': 199, '득': 113, '들': 286, '등': 803, '브': 289, '윗': 86, '블': 115, '디': 382,
-                 '유': 2640, '육': 677, '윤': 290, '율': 96, '융': 127, '따': 115, '딱': 85, '은': 608, '딴': 62, '딸': 74,
-                 '을': 62, '비': 2361, '땀': 56, '읍': 67, '음': 591, '빈': 298, '응': 263, '땅': 231, '때': 76, '의': 895,
-                 '빗': 121, '빙': 223, '빛': 96, '갱': 121, '갯': 108, '크': 282, '큰': 575, '클': 191, '거': 1186, '걸': 228,
-                 '건': 746, '빨': 82, '익': 155, '이': 3396, '인': 1609, '일': 1885, '임': 443, '입': 730, '잉': 86, '잎': 110,
-                 '검': 682, '겉': 228, '게': 279, '겁': 66}
-
-    page_nums = {}
-    for k, v in word_nums.items():
-        cnt, mod = divmod(v, 10000)
-        if mod:
-            cnt += 1
-        if cnt:
-            page_nums[k] = cnt
-    print(page_nums)
+async def run(target_dir):
+    semaphore = asyncio.Semaphore(25)
 
     jobs = []
-    for letter, max_i in page_nums.items():
-        for i in range(1, max_i + 1):
-            jobs.append(request(semaphore, target_dir, i, letter, 10000))
+    for letter in 'ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎㅃㅉㄸㄲㅆ':
+        jobs.append(request(semaphore, target_dir, letter, 1000))
 
     await asyncio.gather(*jobs)
 
 
-def merge_json():
-    target_dir = 'tmp'
-    data = []
+def merge_json(target_dir):
+    if os.path.isdir(target_dir):
+        data = []
 
-    for filename in os.listdir(target_dir):
-        file_path = os.path.join(target_dir, filename)
-        with open(file_path, 'r') as f:
-            data.extend(json.load(f))
+        for filename in os.listdir(target_dir):
+            file_path = os.path.join(target_dir, filename)
+            with open(file_path, 'r') as f:
+                data.extend(json.load(f))
 
-    with open('async_output.json', 'w') as f:
-        json.dump(data, f)
-
-
-async def dev():
-    d = {}
-    semaphore = asyncio.Semaphore(10)
-    await set_word_num(semaphore, d, '튱')
-    print(d)
+        with open('async_output.json', 'w') as f:
+            json.dump(data, f)
 
 
 if __name__ == '__main__':
+    target_dir = 'tmp'
+
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run())
-    merge_json()
+    loop.run_until_complete(run(target_dir))
+    merge_json(target_dir)
